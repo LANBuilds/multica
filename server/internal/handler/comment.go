@@ -1740,6 +1740,10 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 
 	// Determine author identity: agent (via X-Agent-ID header) or member.
 	authorType, authorID := h.resolveActor(r, userID, uuidToString(issue.WorkspaceID))
+	if authorType == "member" && h.isGuest(r, uuidToString(issue.WorkspaceID), userID) && mentionsAgent(req.Content) {
+		writeError(w, http.StatusForbidden, "guests cannot mention agents or squads")
+		return
+	}
 
 	// sourceTaskID captures the agent's currently-executing task when it posts
 	// via the CLI (X-Task-ID header). Stamping it on the comment row keeps the

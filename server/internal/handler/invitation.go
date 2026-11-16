@@ -15,6 +15,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/logger"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
+	"github.com/multica-ai/multica/server/internal/projectaccess"
 	"github.com/multica-ai/multica/server/internal/seatcapacity"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -28,10 +29,12 @@ type InvitationResponse struct {
 	InviteeEmail  string  `json:"invitee_email"`
 	InviteeUserID *string `json:"invitee_user_id"`
 	Role          string  `json:"role"`
-	Status        string  `json:"status"`
-	CreatedAt     string  `json:"created_at"`
-	UpdatedAt     string  `json:"updated_at"`
-	ExpiresAt     string  `json:"expires_at"`
+	// ProjectIDs are the projects a guest invitee joins on acceptance.
+	ProjectIDs []string `json:"project_ids,omitempty"`
+	Status     string   `json:"status"`
+	CreatedAt  string   `json:"created_at"`
+	UpdatedAt  string   `json:"updated_at"`
+	ExpiresAt  string   `json:"expires_at"`
 	// Enriched fields (present in list responses).
 	InviterName   string `json:"inviter_name,omitempty"`
 	InviterEmail  string `json:"inviter_email,omitempty"`
@@ -46,6 +49,7 @@ func invitationToResponse(inv db.WorkspaceInvitation) InvitationResponse {
 		InviteeEmail:  inv.InviteeEmail,
 		InviteeUserID: uuidToPtr(inv.InviteeUserID),
 		Role:          inv.Role,
+		ProjectIDs:    uuidsToStrings(inv.ProjectIds),
 		Status:        inv.Status,
 		CreatedAt:     timestampToString(inv.CreatedAt),
 		UpdatedAt:     timestampToString(inv.UpdatedAt),
@@ -83,6 +87,16 @@ func (h *Handler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	if role == "owner" {
 		writeError(w, http.StatusBadRequest, "cannot invite as owner")
 		return
+	}
+	guest := projectaccess.IsGuestRole(role)
+	var guestProjects []pgtype.UUID
+	if guest {
+		if !h.guestsEnabled(w, r) {
+			return
+		}
+		if guestProjects, ok = h.parseGuestProjectIDs(w, r, requester.WorkspaceID, req.ProjectIDs); !ok {
+			return
+		}
 	}
 
 	// Check if the user is already a member.
@@ -147,7 +161,13 @@ func (h *Handler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 
 	invitationID := uuid.New()
 	expiresAt := time.Now().Add(7 * 24 * time.Hour)
-	if err := h.reserveInvitationCapacity(r.Context(), uuid.UUID(requester.WorkspaceID.Bytes), invitationID, expiresAt); err != nil {
+	// A guest takes no seat, so its invitation reserves none.
+	reserveSeat := h.seatCapacityEnabled() && !guest
+	var reserveErr error
+	if reserveSeat {
+		reserveErr = h.reserveInvitationCapacity(r.Context(), uuid.UUID(requester.WorkspaceID.Bytes), invitationID, expiresAt)
+	}
+	if err := reserveErr; err != nil {
 		if isPersistentSeatCapacityAdmissionRejection(err) {
 			// Full and overcommitted workspaces cannot admit another member until
 			// their durable capacity facts change. Charge repeated attempts to the
@@ -168,10 +188,11 @@ func (h *Handler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	createParams := db.CreateInvitationParams{
 		ID: uuidToPG(invitationID), WorkspaceID: requester.WorkspaceID, InviterID: requester.UserID,
 		InviteeEmail: email, InviteeUserID: inviteeUserID, Role: role,
-		ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true},
+		ExpiresAt:  pgtype.Timestamptz{Time: expiresAt, Valid: true},
+		ProjectIds: guestProjects,
 	}
 	var inv db.WorkspaceInvitation
-	if h.seatCapacityEnabled() {
+	if reserveSeat {
 		tx, txErr := h.TxStarter.Begin(r.Context())
 		if txErr != nil {
 			h.compensateCapacityIntent(r.Context(), invitationID)
@@ -271,6 +292,7 @@ func (h *Handler) ListWorkspaceInvitations(w http.ResponseWriter, r *http.Reques
 			InviteeEmail:  row.InviteeEmail,
 			InviteeUserID: uuidToPtr(row.InviteeUserID),
 			Role:          row.Role,
+			ProjectIDs:    uuidsToStrings(row.ProjectIds),
 			Status:        row.Status,
 			CreatedAt:     timestampToString(row.CreatedAt),
 			UpdatedAt:     timestampToString(row.UpdatedAt),
@@ -506,10 +528,14 @@ func (h *Handler) AcceptInvitation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusGone, "invitation has expired")
 		return
 	}
-	capacityActive, err := h.beginCapacityConsume(r.Context(), uuid.UUID(inv.WorkspaceID.Bytes), uuid.UUID(inv.ID.Bytes), uuid.UUID(inv.ID.Bytes), uuid.UUID(user.ID.Bytes))
-	if err != nil {
-		writeSeatCapacityError(w, err)
-		return
+	guest := projectaccess.IsGuestRole(inv.Role)
+	capacityActive := false
+	if !guest {
+		capacityActive, err = h.beginCapacityConsume(r.Context(), uuid.UUID(inv.WorkspaceID.Bytes), uuid.UUID(inv.ID.Bytes), uuid.UUID(inv.ID.Bytes), uuid.UUID(user.ID.Bytes))
+		if err != nil {
+			writeSeatCapacityError(w, err)
+			return
+		}
 	}
 
 	// Use a transaction: mark accepted + create member atomically.
@@ -540,6 +566,15 @@ func (h *Handler) AcceptInvitation(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, "failed to create membership")
 		return
+	}
+	if guest {
+		if _, err := qtx.AddUserToProjects(r.Context(), db.AddUserToProjectsParams{
+			WorkspaceID: accepted.WorkspaceID, UserID: user.ID,
+			ProjectIds: accepted.ProjectIds, AddedBy: accepted.InviterID,
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create membership")
+			return
+		}
 	}
 
 	// Accepting an invite marks the invitee as onboarded. The web /
