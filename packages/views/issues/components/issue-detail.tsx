@@ -28,6 +28,7 @@ import {
   CircleCheck,
   FileQuestion,
   Loader2,
+  Lock,
   Milestone,
   MoreHorizontal,
   PanelRight,
@@ -47,7 +48,7 @@ import { IconButton } from "@multica/ui/components/common/icon-button";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@multica/ui/components/ui/resizable";
 import { Sheet, SheetContent } from "@multica/ui/components/ui/sheet";
 import { useIsMobile } from "@multica/ui/hooks/use-mobile";
-import { ContentEditor, type ContentEditorRef, TitleEditor, type TitleEditorRef, useFileDropZone, FileDropOverlay, useLazyEditor, useEditorUpload, PreviewSequenceProvider, collectPreviewSequence } from "../../editor";
+import { ContentEditor, ReadonlyContent, type ContentEditorRef, TitleEditor, type TitleEditorRef, useFileDropZone, FileDropOverlay, useLazyEditor, useEditorUpload, PreviewSequenceProvider, collectPreviewSequence } from "../../editor";
 import {
   WAKEUP_ACTIVITY_ACTIONS,
   WakeupActivityIcon,
@@ -80,6 +81,7 @@ import { ActionShortcutKeycaps } from "../../common/shortcut-keycaps";
 import { UnsubscribeArchiveButton } from "../../inbox/components/unsubscribe-archive-button";
 import type { InboxUnsubscribeScope } from "@multica/core/inbox/mutations";
 import { PropRow } from "../../common/prop-row";
+import { useIsGuest } from "@multica/core/permissions";
 import { TimelineHandoff } from "../../workflows/timeline-handoff";
 import { PropertyIcon } from "../../common/property-icon";
 import type { Attachment, Issue, IssueProperty, IssueStatus, IssueStatusCategory, IssuePriority, TimelineEntry, UpdateIssueRequest } from "@multica/core/types";
@@ -564,6 +566,9 @@ const EMPTY_REPLIES: TimelineEntry[] = [];
 // its row and add-property entry are gated on `issue.parent_issue_id` at the
 // render site below — it stays in this list so seeding/visibility flow through
 // the same machinery as the other optional props.
+/** The sidebar sections a guest gets: read-only facts about the issue itself. */
+const GUEST_SIDEBAR_SECTIONS = new Set<IssueSidebarSection>(["properties", "parent", "deliverables"]);
+
 const OPTIONAL_PROP_KEYS = ["priority", "stage", "start_date", "due_date", "labels"] as const;
 type OptionalPropKey = (typeof OPTIONAL_PROP_KEYS)[number];
 
@@ -1511,6 +1516,8 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
   const wsId = useWorkspaceId();
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
+  // A guest (MUL-9420) reads and comments; it edits nothing and sees no runs.
+  const guest = useIsGuest(wsId);
   // Workspace owners and admins moderate any comment authored by anyone
   // (mirrors backend `comment.go:507-512`). Computed here so per-comment
   // rendering doesn't have to re-derive it for every row.
@@ -1820,7 +1827,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
     editComment, deleteComment, toggleResolveComment, toggleReaction: handleToggleReaction,
   } = useIssueTimeline(id, user?.id, activeDeliverableJump?.commentId);
 
-  const { data: commentTasks, isLoading: commentTasksLoading } = useQuery(issueTasksOptions(id));
+  const { data: commentTasks, isLoading: commentTasksLoading } = useQuery({ ...issueTasksOptions(id), enabled: !guest });
   const enteringRunIds = useNewRunIds(id, commentTasks);
   const previousCommentRuns = useRef(new Map<string, CommentRun[]>());
   const { runs: commentRuns, timeline: displayTimeline, standaloneRuns } = useMemo(() => {
@@ -3187,8 +3194,44 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
     </div>
   );
 
+  const locked = (value: ReactNode) => (
+    <>
+      <div inert className="flex min-w-0 flex-1 items-center">{value}</div>
+      <Lock className="size-3 shrink-0 text-faint-foreground" aria-hidden="true" />
+    </>
+  );
+  const guestProperties = (
+    <div>
+      <IssueSidebarSectionHeader title={t(($) => $.detail.section_properties)} open={propertiesOpen} onOpenChange={setPropertiesOpen} />
+      {propertiesOpen && (
+        <>
+          <IssueSidebarPropertyGrid>
+            <PropRow interactive={false} label={t(($) => $.detail.prop_status)}>
+              {locked(<StatusPicker status={issue.status} onUpdate={handleUpdateField} align="start" projectId={issue.project_id} issue={issue} />)}
+            </PropRow>
+            <PropRow interactive={false} label={t(($) => $.detail.prop_assignee)}>
+              {locked(<AssigneePicker assigneeType={issue.assignee_type} assigneeId={issue.assignee_id} onUpdate={handleUpdateField} align="start" />)}
+            </PropRow>
+            <PropRow interactive={false} label={t(($) => $.detail.prop_priority)}>
+              {locked(<PriorityPicker priority={issue.priority} onUpdate={handleUpdateField} align="start" />)}
+            </PropRow>
+            <PropRow interactive={false} label={t(($) => $.detail.prop_project)}>
+              {locked(<IssueProjectPicker projectId={issue.project_id} onUpdate={handleUpdateField} issue={issue} />)}
+            </PropRow>
+            {attachedLabels.length > 0 && (
+              <PropRow interactive={false} label={t(($) => $.detail.prop_labels)}>
+                {locked(<LabelPicker issueId={issue.id} align="start" />)}
+              </PropRow>
+            )}
+          </IssueSidebarPropertyGrid>
+          <p className="px-4 pt-2 text-caption text-muted-foreground">{t(($) => $.detail.guest_readonly_note)}</p>
+        </>
+      )}
+    </div>
+  );
+
   const sidebarSections: Record<IssueSidebarSection, ReactNode> = {
-    properties: (
+    properties: guest ? guestProperties : (
       <div>
         <IssueSidebarSectionHeader title={t(($) => $.detail.section_properties)} open={propertiesOpen} onOpenChange={setPropertiesOpen}  />
         {propertiesOpen && <IssueSidebarPropertyGrid>
@@ -3417,7 +3460,10 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
     <IssueSidebarSections
       sections={sidebarSections}
       available={ISSUE_SIDEBAR_SECTIONS.filter(
-        (section) => (section !== "pull_requests" || githubSettings.prSidebar) && (section !== "plugins" || pluginsEnabled),
+        (section) =>
+          guest
+            ? GUEST_SIDEBAR_SECTIONS.has(section)
+            : (section !== "pull_requests" || githubSettings.prSidebar) && (section !== "plugins" || pluginsEnabled),
       )}
       revealed={revealedWakeupsFor === id ? REVEALED_WAKEUPS : undefined}
       onRevealEnd={() => setRevealedWakeupsFor(null)}
@@ -3587,8 +3633,8 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
             {/* Live "agent is working" chip, leftmost in the right cluster so
                 it never overlaps the title (which truncates to make room).
                 It self-hides when no agent is active. */}
-            <IssueAgentHeaderChip issueId={id} onJumpToRun={jumpToRun} />
-            <IssueWakeupHeaderChip issueId={id} onOpen={openWakeups} />
+            {!guest && <IssueAgentHeaderChip issueId={id} onJumpToRun={jumpToRun} />}
+            {!guest && <IssueWakeupHeaderChip issueId={id} onOpen={openWakeups} />}
             {!onDone && !isPeek && (
               <IssueInboxActions
                 issueId={id}
@@ -3630,7 +3676,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
             >
               {actions.isPinned ? <PinOff /> : <Pin />}
             </IconButton>
-            <IssueActionsDropdown
+            {!guest && <IssueActionsDropdown
               issue={issue}
               align="end"
               // When a parent passes `onDelete`, we detect deletion via effect
@@ -3649,7 +3695,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
                   <MoreHorizontal />
                 </IconButton>
               }
-            />
+            />}
             {isPeek ? (
               trailingActions
             ) : (
@@ -3707,7 +3753,8 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
           />
           <div id={descriptionSectionId}>
           <div data-mc="issue-title">
-          {titleLazy.active && (
+          {guest && <div className={cn("w-full leading-snug", titleSizeClass)}>{issue.title}</div>}
+          {!guest && titleLazy.active && (
             <div className={titleLazy.ready ? undefined : "hidden"}>
               <TitleEditor
                 key={`title-${id}-${titleResetToken}`}
@@ -3738,7 +3785,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
               />
             </div>
           )}
-          {!titleLazy.ready && (
+          {!guest && !titleLazy.ready && (
             <div
               role="button"
               tabIndex={0}
@@ -3872,7 +3919,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
           )}
 
           <div
-            {...descDropZoneProps}
+            {...(guest ? {} : descDropZoneProps)}
             {...descriptionAnnotations.captureProps}
             ref={descriptionAnnotations.cardRef}
             className="relative mt-5 rounded-lg"
@@ -3889,6 +3936,9 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
           >
             {descriptionAnnotations.popup}
             <div data-comment-content={descriptionSourceId}>
+              {guest ? (
+                <ReadonlyContent content={issue.description ?? ""} attachments={descEditorAttachments} />
+              ) : (
               <ContentEditor
                 ref={descEditorRef}
                 key={id}
@@ -3931,6 +3981,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
                 selectionAction={descriptionSelectionAction}
                 attachments={descEditorAttachments}
               />
+              )}
             </div>
 
             <div className="flex items-center gap-1 mt-3">
@@ -3940,11 +3991,13 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
                 onToggle={handleToggleIssueReaction}
                 getActorName={getActorName}
               />
-              <FileUploadButton
-                size="sm"
-                multiple
-                onSelect={(file) => descEditorRef.current?.uploadFile(file)}
-              />
+              {!guest && (
+                <FileUploadButton
+                  size="sm"
+                  multiple
+                  onSelect={(file) => descEditorRef.current?.uploadFile(file)}
+                />
+              )}
             </div>
             {descDragOver && <FileDropOverlay />}
           </div>
@@ -3952,7 +4005,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
           </div>
 
           {/* Sub-issues — Linear-style */}
-          {childIssues.length === 0 && (
+          {childIssues.length === 0 && !guest && (
             <div className="mt-6">
               <button
                 type="button"
@@ -3994,8 +4047,8 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
                   </div>
                   {/* issue.id, not the route param — the endpoint takes a
                       UUID and the route may carry a human-readable id. */}
-                  <SubIssuesAgentWorkingChip parentIssueId={issue.id} />
-                  <input
+                  {!guest && <SubIssuesAgentWorkingChip parentIssueId={issue.id} />}
+                  {!guest && <input
                     type="checkbox"
                     checked={allChildrenSelected}
                     ref={(el) => {
@@ -4009,10 +4062,10 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
                         ? "opacity-100"
                         : "opacity-0 group-hover/sub-issues:opacity-100 focus-visible:opacity-100",
                     )}
-                  />
+                  />}
                   <div className="ml-auto flex items-center gap-0.5">
                     <SubIssueDisplayPopover workspaceProperties={activeWorkspaceProperties} />
-                    <Tooltip>
+                    {!guest && <Tooltip>
                       <TooltipTrigger
                         render={
                           <button
@@ -4026,7 +4079,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
                         }
                       />
                       <TooltipContent side="bottom">{t(($) => $.detail.add_sub_issue_tooltip)}</TooltipContent>
-                    </Tooltip>
+                    </Tooltip>}
                   </div>
                 </div>
 

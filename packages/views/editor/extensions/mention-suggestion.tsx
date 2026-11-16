@@ -771,11 +771,14 @@ export function createMentionSuggestion(
     const userId = useAuthStore.getState().user?.id ?? null;
     const myRole =
       members.find((m) => m.user_id === userId)?.role ?? null;
+    // A guest (MUL-9420) mentions people only: the server refuses agent and
+    // squad mentions from it, and it does not page the whole workspace.
+    const guest = myRole === "guest";
 
     const q = query.toLowerCase();
 
     const allItem: MentionItem[] =
-      "all members".includes(q) || "all".includes(q)
+      !guest && ("all members".includes(q) || "all".includes(q))
         ? [{ id: "all", label: "All members", type: "all" as const }]
         : [];
 
@@ -790,6 +793,7 @@ export function createMentionSuggestion(
     const agentItems: MentionItem[] = agents
       .filter(
         (a) =>
+          !guest &&
           !a.archived_at &&
           (a.name.toLowerCase().includes(q) || matchesPinyin(a.name, q)) &&
           canAssignAgentToIssue(a, { userId, role: myRole }).allowed,
@@ -811,6 +815,7 @@ export function createMentionSuggestion(
     const squadItems: MentionItem[] = squads
       .filter(
         (s) =>
+          !guest &&
           !s.archived_at &&
           (s.name.toLowerCase().includes(q) || matchesPinyin(s.name, q)),
       )

@@ -24,6 +24,10 @@ const state = vi.hoisted(() => ({
   stuck: [] as unknown[],
 }));
 
+vi.mock("@multica/core/permissions", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@multica/core/permissions")>()),
+  useIsGuest: () => false,
+}));
 vi.mock("../navigation", () => ({
   AppLink: ({
     children,

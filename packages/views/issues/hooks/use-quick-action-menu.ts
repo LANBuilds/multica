@@ -4,6 +4,7 @@ import { useCallback, useMemo } from "react";
 import { toast } from "sonner";
 import { useQuery } from "@tanstack/react-query";
 import { useCurrentWorkspace } from "@multica/core/paths";
+import { useIsGuest } from "@multica/core/permissions";
 import { buildQuickActionBody, quickActionListOptions } from "@multica/core/quick-actions";
 import { useT } from "../../i18n";
 
@@ -29,9 +30,11 @@ export function useQuickActionMenu() {
   const { t } = useT("issues");
   const workspace = useCurrentWorkspace();
   const wsId = workspace?.id ?? "";
+  // Quick actions run agents, which a guest (MUL-9420) cannot.
+  const guest = useIsGuest(wsId);
   const { data } = useQuery({
     ...quickActionListOptions(wsId),
-    enabled: wsId !== "",
+    enabled: wsId !== "" && !guest,
   });
 
   const actions = useMemo(

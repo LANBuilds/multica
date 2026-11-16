@@ -13,6 +13,10 @@ const listQuickActions = vi.hoisted(() => vi.fn());
 const renderQuickAction = vi.hoisted(() => vi.fn());
 const toastError = vi.hoisted(() => vi.fn());
 
+vi.mock("@multica/core/permissions", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@multica/core/permissions")>()),
+  useIsGuest: () => false,
+}));
 vi.mock("sonner", () => ({ toast: { error: toastError } }));
 
 vi.mock("@multica/core/api", async (importOriginal) => {

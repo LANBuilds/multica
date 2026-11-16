@@ -3,6 +3,7 @@
 import { TriangleAlert } from "@multica/ui/icons";
 import { useChatStore } from "@multica/core/chat";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multica/core/paths";
+import { useIsGuest } from "@multica/core/permissions";
 import { useIsMobile } from "@multica/ui/hooks/use-mobile";
 import { ChatBar } from "../chat/components/chat-bar";
 import { isFloatingChatRouteSuppressed } from "../chat/floating-chat-visibility";
@@ -55,6 +56,8 @@ export function AppBottomBar() {
   const floatingChatEnabled = useChatStore((s) => s.floatingChatEnabled);
   const { pathname } = useNavigation();
   const chatPath = useWorkspacePaths().chat();
+  // Both halves are about agents, which a guest (MUL-9420) has no access to.
+  const guest = useIsGuest(wsId);
 
   if (!wsId || isMobile) return null;
   // Same gates as the floating window: the Settings preference, and the Chat
@@ -70,8 +73,8 @@ export function AppBottomBar() {
       // column as the page header's trailing action.
       className="hidden h-8 shrink-0 items-center justify-between gap-4 pr-[18px] pl-3 md:flex"
     >
-      <TeamStatus wsId={wsId} />
-      {showChat && <ChatBar />}
+      {!guest && <TeamStatus wsId={wsId} />}
+      {!guest && showChat && <ChatBar />}
     </footer>
   );
 }
